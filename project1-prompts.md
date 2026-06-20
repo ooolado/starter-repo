@@ -4,7 +4,7 @@ Every Cursor Composer prompt for Project 1, in the order they're issued in class
 
 > **Convention used here**: each prompt is in a fenced blockquote. Paste verbatim into Cursor Composer (Cmd-I). When something is parameterised (`{like_this}`), substitute before sending.
 
-> **Session mapping**: Session 3 = LangGraph concepts (Day 3 H1, H2a). Session 4 = build nodes + UI (Day 3 H2b-H2d, H3, H4). Session 5 = guardrails + golden set (Day 4 H1, H2a). Session 6 = eval suite + deploy (Day 4 H2b-H2d, H4). Prompt IDs like `Day 3 H2c` are stable references.
+> **Session mapping**: Session 3 = LangGraph concepts (Day 3 H1, H2a). Session 4 = build nodes + UI (Day 3 H2b-H2d, H3, H4). Session 5 = guardrails + golden set (Day 4 H1c, H1b, H1, H2a — issued in that order). Session 6 = eval suite + deploy (Day 4 H2b-H2d, H4). Prompt IDs like `Day 3 H2c` are stable references.
 
 ---
 
@@ -27,15 +27,15 @@ Every Cursor Composer prompt for Project 1, in the order they're issued in class
 >
 > 1. Import `TypedDict` from `typing` (use the standard `typing.TypedDict`).
 > 2. Define `class ResearchState(TypedDict)` with these fields:
->    - `question: str` - the user's question.
->    - `sub_questions: list[dict]` - each `{"text": str, "source": Literal["web", "local", "both"]}`.
->    - `findings: list[dict]` - each `{"sub_question_index": int, "claim": str, "evidence_url": str, "evidence_text": str}`.
->    - `report: str` - final markdown report.
->    - `step_log: list[str]` - human-readable trace for the UI.
+>   - `question: str` - the user's question.
+>   - `sub_questions: list[dict]` - each `{"text": str, "source": Literal["web", "local", "both"]}`.
+>   - `findings: list[dict]` - each `{"sub_question_index": int, "claim": str, "evidence_url": str, "evidence_text": str}`.
+>   - `report: str` - final markdown report.
+>   - `step_log: list[str]` - human-readable trace for the UI.
 > 3. Export `build_graph()` that:
->    - Wires `START -> planner -> researcher -> writer -> END`.
->    - Uses `SqliteSaver.from_conn_string("checkpoints.sqlite")` as the checkpointer.
->    - Compiles with `.compile(checkpointer=saver)`.
+>   - Wires `START -> planner -> researcher -> writer -> END`.
+>   - Uses `SqliteSaver.from_conn_string("checkpoints.sqlite")` as the checkpointer.
+>   - Compiles with `.compile(checkpointer=saver)`.
 > 4. For now, import `planner_node`, `researcher_node`, `writer_node` from `app.nodes.{planner,researcher,writer}` (we'll write those next; leave them as `pass` stubs in those files if not yet created).
 
 ---
@@ -56,11 +56,11 @@ Every Cursor Composer prompt for Project 1, in the order they're issued in class
 
 > Create `app/nodes/researcher.py` exporting `researcher_node(state: ResearchState) -> dict`.
 >
-> 1. Import the four tools: `web_search`, `fetch_url`, `search_local_docs`, `summarize` from `app.tools.*`.
+> 1. Import the four tools: `web_search`, `fetch_url`, `search_local_docs`, `summarize` from `app.tools.`*.
 > 2. Bind them to `init_chat_model(...)`.
 > 3. For each sub-question in `state["sub_questions"]`, run a small loop (max 4 tool calls per sub-question):
->    - Build messages = [SystemMessage("You are a focused researcher. Use tools to find 1-3 supporting facts with real source URLs for the given sub-question. When you have enough, reply with a JSON list of findings."), HumanMessage(sub_q.text)].
->    - Loop: invoke model, if `tool_calls`, run them and append `ToolMessage`s; otherwise parse the JSON list of findings.
+>   - Build messages = [SystemMessage("You are a focused researcher. Use tools to find 1-3 supporting facts with real source URLs for the given sub-question. When you have enough, reply with a JSON list of findings."), HumanMessage(sub_q.text)].
+>   - Loop: invoke model, if `tool_calls`, run them and append `ToolMessage`s; otherwise parse the JSON list of findings.
 > 4. Each finding is `{"sub_question_index": int, "claim": str, "evidence_url": str, "evidence_text": str}`.
 > 5. Validate `evidence_url` actually appeared somewhere in the tool messages (anti-hallucination check). Drop the finding if not.
 > 6. Append a `step_log` entry per tool call: e.g. `"[sub 2/5] web_search('...')"`.
@@ -73,8 +73,8 @@ Every Cursor Composer prompt for Project 1, in the order they're issued in class
 > Create `app/nodes/writer.py` exporting `writer_node(state: ResearchState) -> dict`.
 >
 > 1. Build a prompt:
->    - System: "You are writing a research report. Produce a markdown report with: 1) a 2-3 sentence executive summary, 2) one H2 section per sub-question, 3) inline `[n]` citations after each factual claim, 4) a numbered Sources section at the end listing each unique URL once. Never invent a URL or fact - only use the supplied findings."
->    - Human: a JSON blob of `{"question": ..., "sub_questions": ..., "findings": ...}`.
+>   - System: "You are writing a research report. Produce a markdown report with: 1) a 2-3 sentence executive summary, 2) one H2 section per sub-question, 3) inline `[n]` citations after each factual claim, 4) a numbered Sources section at the end listing each unique URL once. Never invent a URL or fact - only use the supplied findings."
+>   - Human: a JSON blob of `{"question": ..., "sub_questions": ..., "findings": ...}`.
 > 2. Call the LLM (no tools). Return `{"report": ai_msg.content, "step_log": state["step_log"] + ["Writer: report drafted"]}`.
 > 3. After the LLM returns, post-process: build a set of allowed URLs from `state["findings"]`. Scan the report for markdown URLs `[text](url)` and the Sources section. If any URL isn't in the allowed set, append a warning line: `"> WARNING: filtered hallucinated citations: {bad_urls}"`.
 
@@ -104,20 +104,75 @@ Every Cursor Composer prompt for Project 1, in the order they're issued in class
 > Create three files:
 >
 > 1. `app/main.py` - FastAPI app with:
->    - `GET /` returns `app/ui/index.html`.
->    - `POST /research` accepts `{"question": str}`, creates a thread_id (uuid4), starts the graph in a background task, returns `{"thread_id": ...}`.
->    - `GET /stream/{thread_id}` is a Server-Sent Events endpoint that yields each event from `stream_research(...)` as `data: {json}\n\n`.
->    - Serve static files from `app/ui/` at `/static`.
->
+>   - `GET /` returns `app/ui/index.html`.
+>   - `POST /research` accepts `{"question": str}`, creates a thread_id (uuid4), starts the graph in a background task, returns `{"thread_id": ...}`.
+>   - `GET /stream/{thread_id}` is a Server-Sent Events endpoint that yields each event from `stream_research(...)` as `data: {json}\n\n`.
+>   - Serve static files from `app/ui/` at `/static`.
 > 2. `app/ui/index.html` - a single-page HTMX UI:
->    - Header with the Monk Technologies logo (`/static/logo.png`) and the title "AI Research Assistant".
->    - A `<textarea>` for the question and a "Research" button.
->    - Two panels side-by-side: left "Progress" (live step_log), right "Report" (markdown rendered with the marked.js CDN).
->    - Use the HTMX SSE extension. On button click, POST `/research`, then connect to `/stream/{thread_id}` and append events.
->
+>   - Header with the Monk Technologies logo (`/static/logo.png`) and the title "AI Research Assistant".
+>   - A `<textarea>` for the question and a "Research" button.
+>   - Two panels side-by-side: left "Progress" (live step_log), right "Report" (markdown rendered with the marked.js CDN).
+>   - Use the HTMX SSE extension. On button click, POST `/research`, then connect to `/stream/{thread_id}` and append events.
 > 3. `app/ui/styles.css` - clean styles, palette: orange `#FF8A47`, pink `#FF2E78`, text `#16161C` on white background. Inter font. Card layout with soft shadows.
 >
 > No build step. No npm. Just HTML + a `<script src="https://unpkg.com/htmx.org@1.9.10"></script>`.
+
+---
+
+## Day 4 H1c - Guardrail before/after demo (Session 5)
+
+Prerequisite — create the standard `monk-research-guardrail` first (AWS console, or this CLI command; region `us-east-1`, needs `bedrock:CreateGuardrail`):
+
+```bash
+aws bedrock update-guardrail \
+  --region us-east-1 \
+  --guardrail-identifier seq79m5blzmi \
+  --name "monk-research-guardrail" \
+  --description "Monk bootcamp standard guardrail for Project 1" \
+  --blocked-input-messaging "Sorry — the Monk Research Assistant only handles business and technology research, not cooking questions." \
+  --blocked-outputs-messaging "Sorry — the Monk Research Assistant only handles business and technology research, not cooking questions." \
+  --topic-policy-config '{"topicsConfig":[{"name":"Cooking and Recipes","definition":"Any question or request about cooking food, food recipes, meal preparation, food ingredients, kitchen techniques, or step-by-step instructions for making any dish or meal.","examples":["Give me a step-by-step recipe to make chicken biryani","give me a recipe for pasta","how do I cook rice","ingredients for a cake","how to make soup"],"type":"DENY"}]}' \
+  --content-policy-config '{"filtersConfig":[{"type":"HATE","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"INSULTS","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"SEXUAL","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"VIOLENCE","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"MISCONDUCT","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"PROMPT_ATTACK","inputStrength":"HIGH","outputStrength":"NONE"}]}' \
+  --sensitive-information-policy-config '{"piiEntitiesConfig":[{"type":"PHONE","action":"ANONYMIZE"},{"type":"EMAIL","action":"ANONYMIZE"}]}'
+```
+
+Copy the printed `guardrailId`, then: `export BEDROCK_GUARDRAIL_ID=<id>` and `export BEDROCK_GUARDRAIL_VERSION=DRAFT`.
+
+> Create `app/playground/guardrail_demo.py`:
+>
+> 1. Read `MONK_MODEL` (default `bedrock_converse:openai.gpt-oss-120b-1:0`), `BEDROCK_GUARDRAIL_ID`, and `BEDROCK_GUARDRAIL_VERSION` (default `"DRAFT"`).
+> 2. Near the top, define `TEST_PROMPT = "Give me a step-by-step recipe to make chicken biryani."` (this matches the `Cooking and Recipes` denied topic in `monk-research-guardrail`).
+> 3. If `MONK_MODEL` is `fake` or is not a Bedrock model (does not start with `"bedrock"`), print a message that this demo needs a real Bedrock model, and exit.
+> 4. Build the model with `init_chat_model`:
+>   - If `BEDROCK_GUARDRAIL_ID` is **unset/empty** → build it with **no** guardrail and print the banner `=== CASE 1: NO GUARDRAIL (env not set) ===`.
+>   - If it is **set** → build it with `guardrails={"guardrail_identifier": <id>, "guardrail_version": <version>, "trace": "enabled"}` and print the banner `=== CASE 2: GUARDRAIL ON ===`.
+> 5. Invoke the model once on `TEST_PROMPT`, then print the reply `content` and `response_metadata.get("stopReason")`.
+> 6. End with a one-line verdict: if `stopReason == "guardrail_intervened"` print `BLOCKED by guardrail ✅`, otherwise print `Answered freely (no block).`
+> 7. Add a `__main__` block and keep the file under 50 lines.
+
+Run it twice to see the difference:
+
+```bash
+uv run python -m app.playground.guardrail_demo            # Case 1: no guardrail -> gives the recipe
+export BEDROCK_GUARDRAIL_ID=<your-guardrail-id>
+uv run python -m app.playground.guardrail_demo            # Case 2: guardrail on -> blocked
+```
+
+---
+
+## Day 4 H1b - Attach the Bedrock Guardrail to the app (Session 5)
+
+> Modify `get_chat_model()` in `app/llm.py` so it attaches the Bedrock Guardrail when one is configured, and is a clean no-op when it isn't:
+>
+> 1. Read `BEDROCK_GUARDRAIL_ID` and `BEDROCK_GUARDRAIL_VERSION` (default the version to `"DRAFT"`).
+> 2. Only apply the guardrail when ALL of these are true: (a) `BEDROCK_GUARDRAIL_ID` is set and non-empty, (b) the resolved model name is a Bedrock model (starts with `"bedrock"`), and (c) it is not the `fake` model.
+> 3. When applying, pass `guardrails={"guardrailIdentifier": <id>, "guardrailVersion": <version>, "trace": "enabled"}` into `init_chat_model(...)`. Use **camelCase** keys — `ChatBedrockConverse` passes the dict directly to the Bedrock Converse API which requires camelCase.
+> 4. Do NOT break the existing `@lru_cache`: build the guardrails dict **inside the function body**, not as a new function parameter, and merge it into the kwargs you already pass to `init_chat_model`.
+> 5. Keep the `fake` path and the existing no-guardrail path exactly as they are today.
+> 6. Add a one-line comment noting that Google Vertex's equivalent (Model Armor, via `VERTEX_MODEL_ARMOR_POLICY`) is configured separately on the GCP side and is out of scope here.
+> 7. Update all graph nodes (`app/nodes/planner.py`, `app/nodes/researcher.py`, `app/nodes/writer.py`) to use `get_chat_model()` from `app.llm` instead of calling `init_chat_model()` directly. This ensures the guardrail (and any other centralized config like `region_name`) is applied everywhere. Remove the per-node `DEFAULT_MODEL` constants and `import os` / `from langchain.chat_models import init_chat_model` that are no longer needed.
+>
+> Verify: with `BEDROCK_GUARDRAIL_ID` **unset** the agent runs exactly as before; with it **set**, a prompt matching the denied topic returns the guardrail's refusal and `response_metadata["stopReason"] == "guardrail_intervened"`.
 
 ---
 
@@ -219,3 +274,4 @@ Every Cursor Composer prompt for Project 1, in the order they're issued in class
 **Bedrock KB swap**:
 
 > Replace the `search_local_docs` body to call AWS Bedrock Knowledge Bases via `boto3.client('bedrock-agent-runtime').retrieve_and_generate(...)`. Keep the function signature identical so the graph code does not change.
+

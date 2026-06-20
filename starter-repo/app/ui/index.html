@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Research Assistant — Monk Technologies</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+  <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/sse.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <img src="/static/logo.png" alt="Monk Technologies" class="logo" onerror="this.style.display='none'" />
+    <h1>AI Research Assistant</h1>
+  </div>
+</header>
+
+<main>
+  <section class="input-card card">
+    <label for="question">What would you like to research?</label>
+    <textarea id="question" rows="3" placeholder="e.g. How do I rotate IAM access keys and encrypt S3 buckets?"></textarea>
+    <button id="btn-research" onclick="startResearch()">Research</button>
+  </section>
+
+  <div class="panels">
+    <section class="card panel" id="progress-panel">
+      <h2>Progress</h2>
+      <ul id="step-log"></ul>
+    </section>
+    <section class="card panel" id="report-panel">
+      <h2>Report</h2>
+      <div id="report-content"><p class="placeholder">Report will appear here…</p></div>
+    </section>
+  </div>
+</main>
+
+<script>
+async function startResearch() {
+  const question = document.getElementById('question').value.trim();
+  if (!question) return;
+
+  const btn = document.getElementById('btn-research');
+  const stepLog = document.getElementById('step-log');
+  const reportDiv = document.getElementById('report-content');
+
+  btn.disabled = true;
+  btn.textContent = 'Researching…';
+  stepLog.innerHTML = '';
+  reportDiv.innerHTML = '<p class="placeholder">Working…</p>';
+
+  try {
+    const res = await fetch('/research', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question })
+    });
+    const { thread_id } = await res.json();
+
+    const evtSource = new EventSource('/stream/' + thread_id);
+
+    evtSource.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+
+      if (data.type === 'state' && data.step_log) {
+        stepLog.innerHTML = '';
+        data.step_log.forEach(entry => {
+          const li = document.createElement('li');
+          li.textContent = entry;
+          stepLog.appendChild(li);
+        });
+        stepLog.scrollTop = stepLog.scrollHeight;
+        if (data.node) {
+          reportDiv.innerHTML = '<p class="placeholder">Running: ' + data.node + '…</p>';
+        }
+      }
+
+      if (data.type === 'error') {
+        reportDiv.innerHTML = '<p class="placeholder" style="color:#FF2E78">Error: ' + data.message + '</p>';
+      }
+
+      if (data.type === 'done') {
+        evtSource.close();
+        if (data.step_log && data.step_log.length) {
+          stepLog.innerHTML = '';
+          data.step_log.forEach(entry => {
+            const li = document.createElement('li');
+            li.textContent = entry;
+            stepLog.appendChild(li);
+          });
+        }
+        if (data.report) {
+          reportDiv.innerHTML = marked.parse(data.report);
+        } else {
+          reportDiv.innerHTML = '<p class="placeholder">No report generated.</p>';
+        }
+        btn.disabled = false;
+        btn.textContent = 'Research';
+      }
+    };
+
+    evtSource.onerror = () => {
+      evtSource.close();
+      reportDiv.innerHTML = '<p class="placeholder" style="color:#FF2E78">Connection lost. Try again.</p>';
+      btn.disabled = false;
+      btn.textContent = 'Research';
+    };
+  } catch (err) {
+    console.error(err);
+    btn.disabled = false;
+    btn.textContent = 'Research';
+  }
+}
+</script>
+
+</body>
+</html>

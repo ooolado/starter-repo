@@ -1,0 +1,188 @@
+/* Monk Technologies — AI Research Assistant */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --orange: #FF8A47;
+  --pink: #FF2E78;
+  --text: #16161C;
+  --bg: #FFFFFF;
+  --gray-50: #F9FAFB;
+  --gray-100: #F3F4F6;
+  --gray-200: #E5E7EB;
+  --gray-400: #9CA3AF;
+  --radius: 12px;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: var(--text);
+  background: var(--gray-50);
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* ---------- Header ---------- */
+
+header {
+  background: linear-gradient(135deg, var(--orange), var(--pink));
+  padding: 1rem 2rem;
+  color: #fff;
+}
+
+.header-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.logo {
+  height: 36px;
+  width: auto;
+}
+
+header h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* ---------- Main ---------- */
+
+main {
+  max-width: 1100px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* ---------- Cards ---------- */
+
+.card {
+  background: var(--bg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.5rem;
+}
+
+/* ---------- Input ---------- */
+
+.input-card label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.input-card textarea {
+  width: 100%;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  padding: 0.75rem;
+  font-family: inherit;
+  font-size: 0.95rem;
+  resize: vertical;
+  transition: border-color 0.15s;
+}
+
+.input-card textarea:focus {
+  outline: none;
+  border-color: var(--orange);
+}
+
+.input-card button {
+  margin-top: 0.75rem;
+  padding: 0.6rem 1.6rem;
+  background: linear-gradient(135deg, var(--orange), var(--pink));
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.input-card button:hover { opacity: 0.9; }
+.input-card button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---------- Panels ---------- */
+
+.panels {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 1.5rem;
+}
+
+.panel h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--gray-100);
+}
+
+/* Progress */
+
+#step-log {
+  list-style: none;
+  max-height: 420px;
+  overflow-y: auto;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+#step-log li {
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--gray-100);
+}
+
+#step-log li:last-child { border-bottom: none; }
+
+/* Report */
+
+#report-content {
+  font-size: 0.92rem;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+#report-content h2 {
+  font-size: 1.05rem;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  border-bottom: none;
+}
+
+#report-content p { margin-bottom: 0.6rem; }
+
+#report-content a {
+  color: var(--pink);
+  text-decoration: none;
+}
+
+#report-content a:hover { text-decoration: underline; }
+
+#report-content blockquote {
+  border-left: 3px solid var(--orange);
+  padding-left: 0.75rem;
+  color: var(--gray-400);
+  margin: 0.75rem 0;
+}
+
+.placeholder {
+  color: var(--gray-400);
+  font-style: italic;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 740px) {
+  .panels { grid-template-columns: 1fr; }
+}
