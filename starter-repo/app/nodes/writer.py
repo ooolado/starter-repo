@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 
-from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.graph import ResearchState
-
-DEFAULT_MODEL = "bedrock_converse:openai.gpt-oss-120b-1:0"
+from app.llm import get_chat_model
 
 SYSTEM_PROMPT = (
     "You are writing a research report. Produce a markdown report with: "
@@ -49,7 +46,7 @@ def _check_urls(report: str, allowed: set[str]) -> tuple[str, set[str]]:
 
 
 def writer_node(state: ResearchState) -> dict:
-    model = init_chat_model(os.getenv("MONK_MODEL", DEFAULT_MODEL))
+    model = get_chat_model()
     payload = json.dumps(
         {
             "question": state["question"],

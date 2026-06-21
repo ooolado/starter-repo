@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Literal
 
-from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
 from app.graph import ResearchState
-from app.nodes._utils import extract_text
-
-DEFAULT_MODEL = "bedrock_converse:openai.gpt-oss-120b-1:0"
+from app.guardrails import check_input_guardrail
+from app.llm import get_chat_model
+from app.nodes._utils import extract_text, guardrail_blocked
 SYSTEM_PROMPT = (
     "You are a research planner. Decompose the user's question into 3-7 sub-questions "
     "that, taken together, fully cover the question. Tag each as 'web' (current/news/general), "
@@ -50,18 +48,36 @@ def _parse_planner_json(text: str) -> PlannerOutput | None:
 
 
 def planner_node(state: ResearchState) -> dict:
+    blocked, refusal = check_input_guardrail(state["question"])
+    if blocked:
+        return {
+            "guardrail_blocked": True,
+            "sub_questions": [],
+            "findings": [],
+            "report": refusal,
+            "step_log": state["step_log"] + ["Planner: blocked by guardrail"],
+        }
+
+    model = get_chat_model()
+
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=state["question"]),
     ]
-
-    model = init_chat_model(os.getenv("MONK_MODEL", DEFAULT_MODEL))
 
     structured = model.with_structured_output(PlannerOutput)
     result = structured.invoke(messages)
 
     if result is None:
         ai_msg = model.invoke(messages)
+        if guardrail_blocked(ai_msg):
+            return {
+                "guardrail_blocked": True,
+                "sub_questions": [],
+                "findings": [],
+                "report": extract_text(ai_msg),
+                "step_log": state["step_log"] + ["Planner: blocked by guardrail"],
+            }
         text = extract_text(ai_msg)
         result = _parse_planner_json(text)
 

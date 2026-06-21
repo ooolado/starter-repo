@@ -124,14 +124,13 @@ Every Cursor Composer prompt for Project 1, in the order they're issued in class
 Prerequisite — create the standard `monk-research-guardrail` first (AWS console, or this CLI command; region `us-east-1`, needs `bedrock:CreateGuardrail`):
 
 ```bash
-aws bedrock update-guardrail \
+aws bedrock create-guardrail \
   --region us-east-1 \
-  --guardrail-identifier seq79m5blzmi \
   --name "monk-research-guardrail" \
   --description "Monk bootcamp standard guardrail for Project 1" \
   --blocked-input-messaging "Sorry — the Monk Research Assistant only handles business and technology research, not cooking questions." \
   --blocked-outputs-messaging "Sorry — the Monk Research Assistant only handles business and technology research, not cooking questions." \
-  --topic-policy-config '{"topicsConfig":[{"name":"Cooking and Recipes","definition":"Any question or request about cooking food, food recipes, meal preparation, food ingredients, kitchen techniques, or step-by-step instructions for making any dish or meal.","examples":["Give me a step-by-step recipe to make chicken biryani","give me a recipe for pasta","how do I cook rice","ingredients for a cake","how to make soup"],"type":"DENY"}]}' \
+  --topic-policy-config '{"topicsConfig":[{"name":"Cooking and Recipes","definition":"Any request for cooking recipes, ingredients, or step-by-step food preparation instructions.","examples":["give me a recipe for","how do I cook","ingredients for"],"type":"DENY"}]}' \
   --content-policy-config '{"filtersConfig":[{"type":"HATE","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"INSULTS","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"SEXUAL","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"VIOLENCE","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"MISCONDUCT","inputStrength":"HIGH","outputStrength":"HIGH"},{"type":"PROMPT_ATTACK","inputStrength":"HIGH","outputStrength":"NONE"}]}' \
   --sensitive-information-policy-config '{"piiEntitiesConfig":[{"type":"PHONE","action":"ANONYMIZE"},{"type":"EMAIL","action":"ANONYMIZE"}]}'
 ```
@@ -230,32 +229,51 @@ uv run python -m app.playground.guardrail_demo            # Case 2: guardrail on
 
 ---
 
-## Day 4 H4 - Cloud Run deploy script (Session 6)
+## Day 4 H4a - Cloud SQL setup script (Session 6)
 
-> Create `scripts/deploy_cloudrun.sh`:
+> Create `scripts/create_cloudsql.sh` — an idempotent script (safe to re-run) that provisions a minimal Cloud SQL PostgreSQL instance with pgvector for the research assistant.
 >
-> ```bash
-> #!/usr/bin/env bash
-> set -euo pipefail
+> 1. Read `PROJECT` from `gcloud config get-value project` (never hardcode). Accept overrides via env vars: `CLOUDSQL_INSTANCE` (default `monk-postgres`), `REGION` (default `asia-south1`), `DB_NAME` (default `monk`), `DB_PASS` (default random).
+> 2. Support `--delete` flag to tear down the instance.
+> 3. Step 0: Enable Cloud SQL Admin API (`sqladmin.googleapis.com`). Check `gcloud services list` first — skip the 30s wait if already enabled.
+> 4. Step 1: Create a `db-f1-micro` Postgres 15 instance. If it already exists, skip creation but reset the password so subsequent steps can connect.
+> 5. Step 2: Create the database. Skip if it already exists.
+> 6. Step 3: Run `scripts/postgres-init.sql` to create pgvector extension + tables. Temporarily authorise the current machine's IPv4 (`curl -4 ifconfig.me`), connect via `psql` (fall back to `gcloud sql connect` if psql isn't installed), then remove the IP authorisation.
+> 7. Print the DSN for `.env` (Cloud SQL socket path for Cloud Run), the instance connection name (for `--add-cloudsql-instances`), and a direct-connect DSN for local debugging.
+
+---
+
+## Day 4 H4b - Cloud Run deploy script (Session 6)
+
+> Create `scripts/deploy_cloudrun.sh` — an idempotent script (safe to re-run) that deploys the research assistant to Cloud Run. It should handle everything: API enablement, secret creation, IAM, and deployment.
 >
-> PROJECT_ID="$(gcloud config get-value project)"
-> SERVICE="${SERVICE:-monk-research-assistant}"
-> REGION="${REGION:-asia-south1}"
->
-> gcloud run deploy "$SERVICE" \
->     --source . \
->     --region "$REGION" \
->     --allow-unauthenticated \
->     --set-env-vars "MONK_MODEL=google_vertexai:gemini-2.5-pro,LANGSMITH_PROJECT=$SERVICE" \
->     --set-secrets "POSTGRES_DSN=monk-postgres-dsn:latest,TAVILY_API_KEY=monk-tavily:latest,LANGSMITH_API_KEY=monk-langsmith:latest" \
->     --memory 1Gi \
->     --cpu 1 \
->     --timeout 600 \
->     --concurrency 4
->
-> URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
-> echo "Deployed: $URL"
-> ```
+> 1. `set -euo pipefail`. Read `PROJECT` from `gcloud config get-value project 2>/dev/null` (never hardcode). Exit with a clear error if empty. Accept overrides via env vars: `SERVICE` (default `monk-research-assistant`), `REGION` (default `asia-south1`), `CLOUDSQL_INSTANCE` (default `monk-postgres`). Build `CONNECTION_NAME="${PROJECT}:${REGION}:${INSTANCE}"`.
+> 2. Define helpers: `bold()` for section headers, `ok()` with a green checkmark, `skip()` with a yellow skip icon.
+> 3. Load `.env` if present using a line-by-line parser (do NOT use `source` — values like Postgres DSNs contain `?`, `=`, `:` that break `source`). Use this pattern:
+>   ```bash
+>    while IFS= read -r line; do
+>        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+>        [[ -z "$line" || ! "$line" == *=* ]] && continue
+>        key="${line%%=*}"
+>        value="${line#*=}"
+>        export "$key=$value"
+>    done < .env
+>   ```
+> 4. Step 1 — Enable required APIs in one call: `run.googleapis.com`, `cloudbuild.googleapis.com`, `artifactregistry.googleapis.com`, `secretmanager.googleapis.com`, `sqladmin.googleapis.com`, `aiplatform.googleapis.com` (needed for Vertex AI / Gemini model calls).
+> 5. Step 2 — Create secrets automatically from `.env` values. Write a `push_secret` helper that takes a secret name and value. If the value is empty, exit with an error telling the user to set it in `.env`. If the secret already exists in Secret Manager (`gcloud secrets describe`), skip it. Otherwise create it with `printf "%s" "$value" | gcloud secrets create "$name" --replication-policy=automatic --data-file=- --quiet`. Call it for: `monk-postgres-dsn` from `$POSTGRES_DSN`, `monk-tavily` from `$TAVILY_API_KEY`, `monk-langsmith` from `$LANGSMITH_API_KEY`.
+> 6. Step 3 — Grant IAM roles to the Compute Engine default service account. Look up the project number via `gcloud projects describe "$PROJECT" --format='value(projectNumber)'` and build the SA email as `<project-number>-compute@developer.gserviceaccount.com`. Grant these roles (all via `gcloud ... add-iam-policy-binding`, suppress output with `&>/dev/null || true` for idempotency):
+>   - `roles/secretmanager.secretAccessor` on each secret (via `gcloud secrets add-iam-policy-binding`) so Cloud Run can read secrets at runtime.
+>   - `roles/storage.objectViewer` on the project (via `gcloud projects add-iam-policy-binding`) so Cloud Build can read uploaded source from GCS.
+>   - `roles/cloudbuild.builds.builder` on the project so the SA can trigger builds.
+>   - `roles/artifactregistry.writer` on the project so Cloud Build can push container images.
+>   - `roles/aiplatform.user` on the project so Cloud Run can call Vertex AI / Gemini models.
+> 7. Step 4 — Deploy with `gcloud run deploy --source .` including:
+>   - `--project "$PROJECT"` on every gcloud command.
+>   - `--add-cloudsql-instances "$CONNECTION_NAME"` so the Cloud SQL proxy socket is available.
+>   - `--set-env-vars` with `MONK_MODEL=google_vertexai:gemini-2.5-pro`, `MONK_EMBEDDINGS=google_vertexai:text-embedding-005`, `LANGSMITH_PROJECT=$SERVICE`, `LANGSMITH_TRACING=true`, `GCP_PROJECT=$PROJECT`, `GCP_LOCATION=us-central1` (hardcode `us-central1` — Gemini models are served from there, not from the Cloud Run region).
+>   - `--set-secrets` mapping `POSTGRES_DSN=monk-postgres-dsn:latest`, `TAVILY_API_KEY=monk-tavily:latest`, `LANGSMITH_API_KEY=monk-langsmith:latest`.
+>   - `--memory 1Gi --cpu 1 --timeout 600 --concurrency 4 --allow-unauthenticated`.
+> 8. Fetch and print the deployed URL via `gcloud run services describe`.
 >
 > Also generate a matching `Dockerfile` for Python 3.11 + `uv` + `uvicorn app.main:app --host 0.0.0.0 --port 8080`.
 
@@ -274,4 +292,3 @@ uv run python -m app.playground.guardrail_demo            # Case 2: guardrail on
 **Bedrock KB swap**:
 
 > Replace the `search_local_docs` body to call AWS Bedrock Knowledge Bases via `boto3.client('bedrock-agent-runtime').retrieve_and_generate(...)`. Keep the function signature identical so the graph code does not change.
-

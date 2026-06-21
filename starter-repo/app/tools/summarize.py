@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import os
-
-from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
-DEFAULT_MODEL = "bedrock_converse:openai.gpt-oss-120b-1:0"
+from app.llm import get_chat_model
 
 
 def _summary_prompt(text: str, focus: str) -> str:
@@ -23,7 +20,7 @@ def _summary_prompt(text: str, focus: str) -> str:
 @tool
 def summarize(text: str, focus: str = "") -> str:
     """Compress long text into a three-sentence summary. Use this when tool output is too long to fit in context."""
-    model = init_chat_model(os.getenv("MONK_MODEL", DEFAULT_MODEL))
+    model = get_chat_model()
     response = model.invoke([HumanMessage(content=_summary_prompt(text, focus))])
     content = response.content
     return content if isinstance(content, str) else str(content)

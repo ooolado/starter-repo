@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Research Assistant — Monk Technologies</title>
+  <title>AI Research Assistant — Oladoyin AI</title>
   <link rel="stylesheet" href="/static/styles.css" />
   <script src="https://unpkg.com/htmx.org@1.9.10"></script>
   <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/sse.js"></script>
@@ -13,43 +13,88 @@
 
 <header>
   <div class="header-inner">
-    <img src="/static/logo.png" alt="Monk Technologies" class="logo" onerror="this.style.display='none'" />
-    <h1>AI Research Assistant</h1>
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">OA</div>
+      <div class="brand-text">
+        <h1>Oladoyin AI</h1>
+        <p class="tagline">Research Assistant</p>
+      </div>
+    </div>
+    <span class="header-badge">Powered by Gemini</span>
   </div>
 </header>
 
 <main>
+  <section class="hero-intro">
+    <p class="welcome">Welcome to Olanrewaju Oladoyin Agentic AI tool</p>
+    <h2>What would you like to know?</h2>
+    <p>Ask a research question and get a cited report with sources in seconds.</p>
+  </section>
+
   <section class="input-card card">
+    <div class="card-header">
+      <span class="icon" aria-hidden="true">🔍</span>
+      <h2>Research question</h2>
+    </div>
     <label for="question">What would you like to research?</label>
-    <textarea id="question" rows="3" placeholder="e.g. How do I rotate IAM access keys and encrypt S3 buckets?"></textarea>
-    <button id="btn-research" onclick="startResearch()">Research</button>
+    <textarea id="question" rows="3" placeholder="e.g. What changed in Kubernetes 1.30 for production deployments?"></textarea>
+    <div class="input-actions">
+      <span class="input-hint">Press Research to start — progress streams live</span>
+      <button id="btn-research" onclick="startResearch()">
+        <span class="btn-spinner"></span>
+        <span class="btn-label">Research</span>
+      </button>
+    </div>
   </section>
 
   <div class="panels">
     <section class="card panel" id="progress-panel">
-      <h2>Progress</h2>
+      <div class="card-header">
+        <span class="icon" aria-hidden="true">⚡</span>
+        <h2>Progress</h2>
+      </div>
       <ul id="step-log"></ul>
     </section>
     <section class="card panel" id="report-panel">
-      <h2>Report</h2>
-      <div id="report-content"><p class="placeholder">Report will appear here…</p></div>
+      <div class="card-header">
+        <span class="icon" aria-hidden="true">📄</span>
+        <h2>Report</h2>
+      </div>
+      <div id="report-content"><p class="placeholder">Your report will appear here…</p></div>
     </section>
   </div>
 </main>
 
+<footer>Built with <span>Oladoyin AI</span></footer>
+
 <script>
+function setLoading(loading) {
+  const btn = document.getElementById('btn-research');
+  btn.disabled = loading;
+  btn.classList.toggle('loading', loading);
+  btn.querySelector('.btn-label').textContent = loading ? 'Researching…' : 'Research';
+}
+
+function renderSteps(stepLog, entries) {
+  stepLog.innerHTML = '';
+  entries.forEach(entry => {
+    const li = document.createElement('li');
+    li.textContent = entry;
+    stepLog.appendChild(li);
+  });
+  stepLog.scrollTop = stepLog.scrollHeight;
+}
+
 async function startResearch() {
   const question = document.getElementById('question').value.trim();
   if (!question) return;
 
-  const btn = document.getElementById('btn-research');
   const stepLog = document.getElementById('step-log');
   const reportDiv = document.getElementById('report-content');
 
-  btn.disabled = true;
-  btn.textContent = 'Researching…';
+  setLoading(true);
   stepLog.innerHTML = '';
-  reportDiv.innerHTML = '<p class="placeholder">Working…</p>';
+  reportDiv.innerHTML = '<p class="working-pulse">Starting research…</p>';
 
   try {
     const res = await fetch('/research', {
@@ -65,54 +110,47 @@ async function startResearch() {
       const data = JSON.parse(e.data);
 
       if (data.type === 'state' && data.step_log) {
-        stepLog.innerHTML = '';
-        data.step_log.forEach(entry => {
-          const li = document.createElement('li');
-          li.textContent = entry;
-          stepLog.appendChild(li);
-        });
-        stepLog.scrollTop = stepLog.scrollHeight;
+        renderSteps(stepLog, data.step_log);
         if (data.node) {
-          reportDiv.innerHTML = '<p class="placeholder">Running: ' + data.node + '…</p>';
+          reportDiv.innerHTML = '<p class="working-pulse">Running ' + data.node + '…</p>';
         }
       }
 
       if (data.type === 'error') {
-        reportDiv.innerHTML = '<p class="placeholder" style="color:#FF2E78">Error: ' + data.message + '</p>';
+        reportDiv.innerHTML = '<p class="placeholder error-msg">Error: ' + data.message + '</p>';
       }
 
       if (data.type === 'done') {
         evtSource.close();
         if (data.step_log && data.step_log.length) {
-          stepLog.innerHTML = '';
-          data.step_log.forEach(entry => {
-            const li = document.createElement('li');
-            li.textContent = entry;
-            stepLog.appendChild(li);
-          });
+          renderSteps(stepLog, data.step_log);
         }
         if (data.report) {
           reportDiv.innerHTML = marked.parse(data.report);
         } else {
           reportDiv.innerHTML = '<p class="placeholder">No report generated.</p>';
         }
-        btn.disabled = false;
-        btn.textContent = 'Research';
+        setLoading(false);
       }
     };
 
     evtSource.onerror = () => {
       evtSource.close();
-      reportDiv.innerHTML = '<p class="placeholder" style="color:#FF2E78">Connection lost. Try again.</p>';
-      btn.disabled = false;
-      btn.textContent = 'Research';
+      reportDiv.innerHTML = '<p class="placeholder error-msg">Connection lost. Try again.</p>';
+      setLoading(false);
     };
   } catch (err) {
     console.error(err);
-    btn.disabled = false;
-    btn.textContent = 'Research';
+    reportDiv.innerHTML = '<p class="placeholder error-msg">Request failed. Try again.</p>';
+    setLoading(false);
   }
 }
+
+document.getElementById('question').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    startResearch();
+  }
+});
 </script>
 
 </body>

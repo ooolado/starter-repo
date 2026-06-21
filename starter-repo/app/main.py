@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 
-app = FastAPI(title="Monk AI Research Assistant")
+app = FastAPI(title="Oladoyin AI Research Assistant")
 app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
 
 _tasks: dict[str, asyncio.Task] = {}

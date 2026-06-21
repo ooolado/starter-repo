@@ -24,3 +24,9 @@ def extract_text(msg: BaseMessage) -> str:
                 parts.append(block)
         return "\n".join(parts)
     return str(content)
+
+
+def guardrail_blocked(msg: BaseMessage) -> bool:
+    """True when Bedrock Guardrail intervened on this response."""
+    meta = getattr(msg, "response_metadata", None) or {}
+    return meta.get("stopReason") == "guardrail_intervened"

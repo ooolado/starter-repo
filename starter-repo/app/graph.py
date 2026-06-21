@@ -15,29 +15,45 @@ class ResearchState(TypedDict):
     findings: list[dict]
     report: str
     step_log: list[str]
+    guardrail_blocked: bool
 
 
-_builder = None
+def guard_node(state: ResearchState) -> dict:
+    """Post-writer citation guardrail: flag any hallucinated URLs."""
+    from app.guardrails import validate_citations
+
+    allowed_urls = {f["evidence_url"] for f in state["findings"] if f.get("evidence_url")}
+    ok, bad_urls = validate_citations(state["report"], allowed_urls)
+
+    if not ok:
+        warning = f"> WARNING: filtered hallucinated citations: {bad_urls}"
+        return {
+            "report": warning + "\n\n" + state["report"],
+            "step_log": state["step_log"] + [f"Guard: {len(bad_urls)} hallucinated URL(s) flagged"],
+        }
+
+    return {"step_log": state["step_log"] + ["Guard: all citations valid"]}
 
 
 def _get_builder():
-    global _builder
-    if _builder is not None:
-        return _builder
-
     from app.nodes.planner import planner_node
     from app.nodes.researcher import researcher_node
     from app.nodes.writer import writer_node
 
-    _builder = StateGraph(ResearchState)
-    _builder.add_node("planner", planner_node)
-    _builder.add_node("researcher", researcher_node)
-    _builder.add_node("writer", writer_node)
-    _builder.add_edge(START, "planner")
-    _builder.add_edge("planner", "researcher")
-    _builder.add_edge("researcher", "writer")
-    _builder.add_edge("writer", END)
-    return _builder
+    builder = StateGraph(ResearchState)
+    builder.add_node("planner", planner_node)
+    builder.add_node("researcher", researcher_node)
+    builder.add_node("writer", writer_node)
+    builder.add_node("guard", guard_node)
+    builder.add_edge(START, "planner")
+    builder.add_conditional_edges(
+        "planner",
+        lambda state: END if state.get("guardrail_blocked") else "researcher",
+    )
+    builder.add_edge("researcher", "writer")
+    builder.add_edge("writer", "guard")
+    builder.add_edge("guard", END)
+    return builder
 
 
 _saver = MemorySaver()
@@ -57,6 +73,7 @@ async def stream_research(question: str, thread_id: str) -> AsyncIterator[dict[s
             "findings": [],
             "report": "",
             "step_log": [],
+            "guardrail_blocked": False,
         },
         config={"configurable": {"thread_id": thread_id}},
         stream_mode="updates",

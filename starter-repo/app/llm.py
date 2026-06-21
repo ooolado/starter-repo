@@ -35,7 +35,19 @@ def _resolved_embedding_name(name: str | None) -> str:
     return (name or os.getenv("MONK_EMBEDDINGS") or DEFAULT_EMBEDDINGS).strip()
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=8)
+def _cached_chat_model(resolved: str, guardrail_key: str) -> Any:
+    kwargs: dict[str, Any] = {}
+    if guardrail_key:
+        guardrail_id, guardrail_version = guardrail_key.split("|", 1)
+        kwargs["guardrails"] = {
+            "guardrailIdentifier": guardrail_id,
+            "guardrailVersion": guardrail_version,
+            "trace": "enabled",
+        }
+    return init_chat_model(resolved, **kwargs)
+
+
 def get_chat_model(name: str | None = None, **kwargs: Any):
     """Return a LangChain chat model. Reads `MONK_MODEL` when name is None.
 
@@ -45,7 +57,26 @@ def get_chat_model(name: str | None = None, **kwargs: Any):
     resolved = _resolved_chat_name(name)
     if is_fake_chat_model(resolved):
         return fake_chat_model(**kwargs)
-    return init_chat_model(resolved, **kwargs)
+
+    # Google Vertex's equivalent (Model Armor, via VERTEX_MODEL_ARMOR_POLICY) is configured separately on the GCP side and is out of scope here.
+    guardrail_id = os.getenv("BEDROCK_GUARDRAIL_ID", "").strip()
+    guardrail_version = os.getenv("BEDROCK_GUARDRAIL_VERSION", "DRAFT").strip() or "DRAFT"
+    guardrail_key = ""
+    if guardrail_id and resolved.startswith("bedrock") and not is_fake_chat_model(resolved):
+        guardrail_key = f"{guardrail_id}|{guardrail_version}"
+
+    if kwargs:
+        merged = dict(kwargs)
+        if guardrail_key and "guardrails" not in merged:
+            gid, gver = guardrail_key.split("|", 1)
+            merged["guardrails"] = {
+                "guardrailIdentifier": gid,
+                "guardrailVersion": gver,
+                "trace": "enabled",
+            }
+        return init_chat_model(resolved, **merged)
+
+    return _cached_chat_model(resolved, guardrail_key)
 
 
 @lru_cache(maxsize=4)
