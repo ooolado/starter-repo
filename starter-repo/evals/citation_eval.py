@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -23,7 +24,10 @@ load_dotenv()
 GOLDEN_PATH = Path(__file__).resolve().parent / "golden.jsonl"
 
 _BODY_CITE_RE = re.compile(r"\[(\d+)\]")
-_SOURCES_LINE_RE = re.compile(r"^\s*(?:\[(\d+)\]|(\d+)\.)\s", re.MULTILINE)
+_SOURCES_LINE_RE = re.compile(
+    r"^\s*(?:\[(\d+)\]|(\d+)\.)\s*(?:\S.*)?$",
+    re.MULTILINE,
+)
 
 
 def load_golden() -> list[dict]:
@@ -78,11 +82,13 @@ def check_citations(report: str, min_citations: int) -> tuple[bool, list[str]]:
             f"(b) body [n] missing from Sources: {missing_in_sources}"
         )
 
-    source_urls = extract_urls(sources)
-    body_urls = extract_urls(body)
-    orphan_urls = sorted(source_urls - body_urls)
-    if orphan_urls:
-        failures.append(f"(c) Sources URLs not in body: {orphan_urls}")
+    # Reports use inline [n] in the body and numbered URLs in Sources.
+    # Check (c): every Sources entry must be cited in the body as [n].
+    uncited_sources = sorted(source_nums - body_nums)
+    if uncited_sources:
+        failures.append(
+            f"(c) Sources entries not cited in body: {uncited_sources}"
+        )
 
     return len(failures) == 0, failures
 
@@ -97,13 +103,28 @@ def run_graph(question: str) -> dict:
             "report": "",
             "step_log": [],
             "guardrail_blocked": False,
+            "reflect_decision": "",
+            "reflect_gaps": "",
+            "reflect_loops": 0,
         },
         config={"configurable": {"thread_id": str(uuid.uuid4())}},
     )
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run citation eval on golden rows")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Evaluate only the first N rows (0 = all)",
+    )
+    args = parser.parse_args()
+
     rows = load_golden()
+    if args.limit > 0:
+        rows = rows[: args.limit]
+
     passed = failed = 0
 
     print(f"Citation eval — {len(rows)} golden rows\n")
@@ -126,12 +147,16 @@ def main() -> None:
             failed += 1
             continue
 
+        findings_count = len(result.get("findings", []))
         ok, reasons = check_citations(report, min_citations)
         if ok:
-            print(f"  [PASS] {len(extract_urls(report))} unique URLs")
+            print(
+                f"  [PASS] {findings_count} finding(s), "
+                f"{len(extract_urls(report))} unique URLs"
+            )
             passed += 1
         else:
-            print("  [FAIL]")
+            print(f"  [FAIL] {findings_count} finding(s)")
             for reason in reasons:
                 print(f"         {reason}")
             failed += 1

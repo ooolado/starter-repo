@@ -21,6 +21,59 @@ SYSTEM_PROMPT = (
 
 _MD_URL_RE = re.compile(r"\[.*?\]\((https?://[^\s\)]+)\)")
 _BARE_URL_RE = re.compile(r"(https?://[^\s\)>]+)")
+_BODY_CITE_RE = re.compile(r"\[(\d+)\]")
+
+
+def _split_report(report: str) -> tuple[str, str]:
+    lower = report.lower()
+    for marker in ("## sources", "# sources"):
+        idx = lower.rfind(marker)
+        if idx != -1:
+            return report[:idx].strip(), report[idx:].strip()
+    return report.strip(), ""
+
+
+def _body_citation_numbers(body: str) -> set[int]:
+    return {int(n) for n in _BODY_CITE_RE.findall(body)}
+
+
+def _finalize_citations(report: str, findings: list[dict]) -> str:
+    """Rebuild Sources from findings and ensure every source is cited in the body."""
+    urls: list[str] = []
+    for finding in findings:
+        url = finding.get("evidence_url", "")
+        if url and url not in urls:
+            urls.append(url)
+    if not urls:
+        return report
+
+    body, _ = _split_report(report)
+    max_num = len(urls)
+    body = _BODY_CITE_RE.sub(
+        lambda m: m.group(0) if 1 <= int(m.group(1)) <= max_num else "",
+        body,
+    )
+
+    url_to_num = {url: index for index, url in enumerate(urls, start=1)}
+    cited = _body_citation_numbers(body)
+    evidence_lines = ["", "## Evidence"]
+    for finding in findings:
+        url = finding.get("evidence_url", "")
+        number = url_to_num.get(url)
+        if not number or number in cited:
+            continue
+        claim = str(finding.get("claim", "")).strip()
+        if claim:
+            evidence_lines.append(f"- {claim} [{number}]")
+            cited.add(number)
+
+    for number in range(1, max_num + 1):
+        if number not in cited:
+            evidence_lines.append(f"- Supporting evidence [{number}]")
+            cited.add(number)
+
+    sources_lines = ["## Sources", *[f"{number}. {url}" for number, url in enumerate(urls, start=1)]]
+    return body + "\n".join(evidence_lines) + "\n\n" + "\n".join(sources_lines)
 
 
 def _allowed_urls(findings: list[dict]) -> set[str]:
@@ -65,6 +118,7 @@ def writer_node(state: ResearchState) -> dict:
     report = extract_text(ai_msg)
 
     allowed = _allowed_urls(state["findings"])
+    report = _finalize_citations(report, state["findings"])
     report, bad_urls = _check_urls(report, allowed)
 
     step_log = [*state["step_log"], "Writer: report drafted"]

@@ -1,4 +1,4 @@
-"""Research assistant LangGraph — planner -> researcher -> writer."""
+"""Research assistant LangGraph — planner -> researcher -> reflect -> writer."""
 
 from __future__ import annotations
 
@@ -16,6 +16,9 @@ class ResearchState(TypedDict):
     report: str
     step_log: list[str]
     guardrail_blocked: bool
+    reflect_decision: str
+    reflect_gaps: str
+    reflect_loops: int
 
 
 def guard_node(state: ResearchState) -> dict:
@@ -35,14 +38,25 @@ def guard_node(state: ResearchState) -> dict:
     return {"step_log": state["step_log"] + ["Guard: all citations valid"]}
 
 
+def _route_after_reflect(state: ResearchState) -> str:
+    if (
+        state.get("reflect_decision") == "need_more"
+        and state.get("reflect_loops", 0) < 1
+    ):
+        return "researcher"
+    return "writer"
+
+
 def _get_builder():
     from app.nodes.planner import planner_node
+    from app.nodes.reflect import reflect_node
     from app.nodes.researcher import researcher_node
     from app.nodes.writer import writer_node
 
     builder = StateGraph(ResearchState)
     builder.add_node("planner", planner_node)
     builder.add_node("researcher", researcher_node)
+    builder.add_node("reflect", reflect_node)
     builder.add_node("writer", writer_node)
     builder.add_node("guard", guard_node)
     builder.add_edge(START, "planner")
@@ -50,7 +64,8 @@ def _get_builder():
         "planner",
         lambda state: END if state.get("guardrail_blocked") else "researcher",
     )
-    builder.add_edge("researcher", "writer")
+    builder.add_edge("researcher", "reflect")
+    builder.add_conditional_edges("reflect", _route_after_reflect)
     builder.add_edge("writer", "guard")
     builder.add_edge("guard", END)
     return builder
@@ -74,6 +89,9 @@ async def stream_research(question: str, thread_id: str) -> AsyncIterator[dict[s
             "report": "",
             "step_log": [],
             "guardrail_blocked": False,
+            "reflect_decision": "",
+            "reflect_gaps": "",
+            "reflect_loops": 0,
         },
         config={"configurable": {"thread_id": thread_id}},
         stream_mode="updates",

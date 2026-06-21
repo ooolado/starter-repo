@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
+from urllib.parse import urlparse, urlunparse
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -11,13 +13,14 @@ from app.graph import ResearchState
 from app.llm import get_chat_model
 from app.nodes._utils import extract_text
 from app.tools.fetch_url import fetch_url
+from app.tools.read_pdf import read_pdf
 from app.tools.search_local_docs import search_local_docs
 from app.tools.summarize import summarize
 from app.tools.web_search import web_search
 
 MAX_TOOL_CALLS_PER_SUB = 4
 
-TOOLS = [web_search, fetch_url, search_local_docs, summarize]
+TOOLS = [web_search, fetch_url, read_pdf, search_local_docs, summarize]
 TOOL_MAP = {t.name: t for t in TOOLS}
 _BEDROCK_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
@@ -43,6 +46,25 @@ def _resolve_tool_name(name: str) -> str | None:
     return None
 
 
+def _ai_transcript_text(msg: AIMessage) -> str:
+    """Text to include when flattening assistant turns (text + reasoning blocks)."""
+    text = extract_text(msg)
+    if text.strip():
+        return text
+    content = msg.content
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "reasoning_content":
+                rc = block.get("reasoning_content") or {}
+                if isinstance(rc, dict):
+                    reasoning = str(rc.get("text", "")).strip()
+                    if reasoning:
+                        return reasoning
+    return ""
+
+
 def _messages_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
     """Convert tool-call history to plain text so Bedrock never replays invalid toolUse blocks."""
     has_tool_history = any(
@@ -50,7 +72,7 @@ def _messages_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
         for m in messages
     )
     if not has_tool_history:
-        return messages
+        return _sanitize_messages(messages)
 
     parts: list[str] = []
     system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
@@ -58,22 +80,72 @@ def _messages_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
         if isinstance(msg, SystemMessage):
             continue
         if isinstance(msg, HumanMessage):
-            parts.append(str(msg.content))
+            text = str(msg.content).strip()
+            if text:
+                parts.append(text)
         elif isinstance(msg, AIMessage):
             if msg.tool_calls:
                 for call in msg.tool_calls:
                     name = _resolve_tool_name(call["name"]) or call["name"]
                     parts.append(
-                        f"\n[Tool call: {name}({json.dumps(call['args'])}]"
+                        f"\n[Tool call: {name}({json.dumps(call['args'])})]"
                     )
             else:
-                text = extract_text(msg)
+                text = _ai_transcript_text(msg)
                 if text.strip():
                     parts.append(f"\n[Assistant reply]\n{text}")
         elif isinstance(msg, ToolMessage):
-            parts.append(f"\n[Tool result]\n{msg.content}")
+            body = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if body.strip():
+                parts.append(f"\n[Tool result]\n{body}")
 
-    return [*system_msgs, HumanMessage(content="".join(parts))]
+    transcript = "\n".join(parts).strip() or "(continuing research)"
+    return [*system_msgs, HumanMessage(content=transcript)]
+
+
+def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Bedrock Converse rejects messages whose content field is empty."""
+    sanitized: list[BaseMessage] = []
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            sanitized.append(msg)
+        elif isinstance(msg, HumanMessage):
+            text = str(msg.content).strip() or "(continuing research)"
+            sanitized.append(HumanMessage(content=text))
+        elif isinstance(msg, AIMessage):
+            if msg.tool_calls:
+                sanitized.append(msg)
+                continue
+            text = _ai_transcript_text(msg)
+            if text.strip():
+                sanitized.append(AIMessage(content=text))
+            # Skip empty assistant turns — they cause ValidationException.
+        elif isinstance(msg, ToolMessage):
+            body = msg.content if isinstance(msg.content, str) else str(msg.content)
+            sanitized.append(ToolMessage(content=body.strip() or "(empty tool result)", tool_call_id=msg.tool_call_id))
+        else:
+            sanitized.append(msg)
+    return sanitized
+
+
+def _normalize_url(url: str) -> str:
+    url = url.strip().rstrip(".,;:)")
+    parsed = urlparse(url)
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = parsed.path.rstrip("/") or ""
+    return urlunparse((parsed.scheme.lower(), netloc, path, "", parsed.query, ""))
+
+
+def _resolve_allowed_url(url: str, allowed_urls: set[str]) -> str | None:
+    if not url:
+        return None
+    norm = _normalize_url(url)
+    for candidate in allowed_urls:
+        if _normalize_url(candidate) == norm:
+            return candidate
+    return None
 
 
 def _extract_urls_from_messages(messages: list[BaseMessage]) -> set[str]:
@@ -103,8 +175,9 @@ def _parse_findings(text: str, sub_idx: int, allowed_urls: set[str]) -> list[dic
     for item in raw:
         if not isinstance(item, dict):
             continue
-        url = str(item.get("evidence_url", ""))
-        if url and url not in allowed_urls:
+        raw_url = str(item.get("evidence_url", ""))
+        url = _resolve_allowed_url(raw_url, allowed_urls) if raw_url else ""
+        if raw_url and not url:
             continue
         validated.append(
             {
@@ -117,7 +190,80 @@ def _parse_findings(text: str, sub_idx: int, allowed_urls: set[str]) -> list[dic
     return validated
 
 
+def _fallback_findings_from_tools(
+    messages: list[BaseMessage], sub_idx: int, limit: int = 3
+) -> list[dict]:
+    """Build findings directly from tool outputs when the model returns no JSON."""
+    findings: list[dict] = []
+    seen: set[str] = set()
+
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        text = msg.content if isinstance(msg.content, str) else str(msg.content)
+
+        for prefix in (r"\[Source: (https?://[^\]]+)\]", r"\[PDF Source: (https?://[^\]]+)\]"):
+            match = re.match(rf"{prefix}\n(.*)", text, re.DOTALL)
+            if not match:
+                continue
+            url = match.group(1).strip()
+            body = match.group(2).strip()
+            key = _normalize_url(url)
+            if key in seen or not body:
+                continue
+            seen.add(key)
+            claim = " ".join(body.split()[:24])
+            findings.append(
+                {
+                    "sub_question_index": sub_idx,
+                    "claim": claim,
+                    "evidence_url": url,
+                    "evidence_text": body[:500],
+                }
+            )
+            break
+
+        stripped = text.strip()
+        if not stripped.startswith("["):
+            continue
+        try:
+            data = ast.literal_eval(stripped)
+        except (SyntaxError, ValueError):
+            continue
+        if not isinstance(data, list):
+            continue
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or item.get("source_url") or "").strip()
+            content = str(
+                item.get("content") or item.get("text") or item.get("title") or ""
+            ).strip()
+            if not url or not content:
+                continue
+            key = _normalize_url(url)
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(
+                {
+                    "sub_question_index": sub_idx,
+                    "claim": " ".join(content.split()[:24]),
+                    "evidence_url": url,
+                    "evidence_text": content[:500],
+                }
+            )
+            if len(findings) >= limit:
+                return findings
+
+    return findings[:limit]
+
+
 def researcher_node(state: ResearchState) -> dict:
+    gaps = state.get("reflect_gaps", "").strip()
+    if gaps:
+        return _research_gaps(state, gaps)
+
     base_model = get_chat_model()
     model = base_model.bind_tools(TOOLS)
     sub_questions = state["sub_questions"]
@@ -131,19 +277,30 @@ def researcher_node(state: ResearchState) -> dict:
             HumanMessage(content=sub_q["text"]),
         ]
 
-        found = False
+        sub_findings: list[dict] = []
         for _ in range(MAX_TOOL_CALLS_PER_SUB):
             ai_msg = model.invoke(_messages_for_model(messages))
-            messages.append(ai_msg)
 
             if not ai_msg.tool_calls:
                 text = extract_text(ai_msg)
+                if not text.strip():
+                    messages.append(
+                        HumanMessage(
+                            content=(
+                                "Continue research: use a tool or reply ONLY with a JSON list of findings."
+                            )
+                        )
+                    )
+                    continue
+                messages.append(ai_msg)
                 allowed = _extract_urls_from_messages(messages)
-                findings = _parse_findings(text, sub_idx, allowed)
-                all_findings.extend(findings)
-                found = True
-                break
+                parsed = _parse_findings(text, sub_idx, allowed)
+                if parsed:
+                    sub_findings = parsed
+                    break
+                continue
 
+            messages.append(ai_msg)
             for call in ai_msg.tool_calls:
                 tool_name = _resolve_tool_name(call["name"])
                 step_log.append(
@@ -162,7 +319,7 @@ def researcher_node(state: ResearchState) -> dict:
                 content = result if isinstance(result, str) else str(result)
                 messages.append(ToolMessage(content=content, tool_call_id=call["id"]))
 
-        if not found:
+        if not sub_findings:
             step_log.append(f"[sub {sub_idx + 1}/{total}] summarizing gathered data")
             messages.append(HumanMessage(content=(
                 "You have gathered enough information. Now reply ONLY with a JSON list of findings. "
@@ -172,12 +329,95 @@ def researcher_node(state: ResearchState) -> dict:
             ai_msg = base_model.invoke(_messages_for_model(messages))
             text = extract_text(ai_msg)
             allowed = _extract_urls_from_messages(messages)
-            findings = _parse_findings(text, sub_idx, allowed)
-            all_findings.extend(findings)
-            if not findings:
+            sub_findings = _parse_findings(text, sub_idx, allowed)
+
+        if not sub_findings:
+            sub_findings = _fallback_findings_from_tools(messages, sub_idx)
+            if sub_findings:
+                step_log.append(
+                    f"[sub {sub_idx + 1}/{total}] recovered {len(sub_findings)} finding(s) from tool output"
+                )
+            else:
                 step_log.append(f"[sub {sub_idx + 1}/{total}] no parseable findings")
 
+        all_findings.extend(sub_findings)
+
     return {"findings": all_findings, "step_log": step_log}
+
+
+def _research_gaps(state: ResearchState, gaps: str) -> dict:
+    """Second-pass research to fill gaps identified by reflect_node."""
+    base_model = get_chat_model()
+    model = base_model.bind_tools(TOOLS)
+    step_log: list[str] = [*state["step_log"], f"Researcher: gap-fill — {gaps[:100]}"]
+
+    messages: list[BaseMessage] = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(
+            content=(
+                f"Original question: {state['question']}\n\n"
+                f"Fill these specific gaps:\n{gaps}\n\n"
+                "Use tools as needed, then reply ONLY with a JSON list of NEW findings:\n"
+                '[{"claim": "...", "evidence_url": "...", "evidence_text": "..."}]'
+            )
+        ),
+    ]
+
+    existing = list(state.get("findings", []))
+    sub_idx = max((f.get("sub_question_index", 0) for f in existing), default=0)
+
+    for _ in range(MAX_TOOL_CALLS_PER_SUB):
+        ai_msg = model.invoke(_messages_for_model(messages))
+
+        if not ai_msg.tool_calls:
+            text = extract_text(ai_msg)
+            if not text.strip():
+                messages.append(
+                    HumanMessage(
+                        content="Continue gap-fill: use a tool or reply with JSON findings."
+                    )
+                )
+                continue
+            messages.append(ai_msg)
+            allowed = _extract_urls_from_messages(messages)
+            new_findings = _parse_findings(text, sub_idx, allowed)
+            if not new_findings:
+                new_findings = _fallback_findings_from_tools(messages, sub_idx)
+            return {
+                "findings": existing + new_findings,
+                "reflect_gaps": "",
+                "reflect_loops": state.get("reflect_loops", 0) + 1,
+                "step_log": step_log + [f"Researcher: added {len(new_findings)} gap-fill finding(s)"],
+            }
+
+        messages.append(ai_msg)
+        for call in ai_msg.tool_calls:
+            tool_name = _resolve_tool_name(call["name"])
+            step_log.append(f"[gap-fill] {tool_name or call['name']}({_summarize_args(call['args'])})")
+            if not tool_name or not _BEDROCK_TOOL_NAME_RE.match(tool_name):
+                result = f"Error: unknown tool {call['name']!r}."
+            else:
+                try:
+                    result = TOOL_MAP[tool_name].invoke(call["args"])
+                except Exception as exc:
+                    result = f"Tool error: {exc}"
+            content = result if isinstance(result, str) else str(result)
+            messages.append(ToolMessage(content=content, tool_call_id=call["id"]))
+
+    messages.append(HumanMessage(content=(
+        "Reply ONLY with a JSON list of NEW findings for the gaps above."
+    )))
+    ai_msg = base_model.invoke(_messages_for_model(messages))
+    allowed = _extract_urls_from_messages(messages)
+    new_findings = _parse_findings(extract_text(ai_msg), sub_idx, allowed)
+    if not new_findings:
+        new_findings = _fallback_findings_from_tools(messages, sub_idx)
+    return {
+        "findings": existing + new_findings,
+        "reflect_gaps": "",
+        "reflect_loops": state.get("reflect_loops", 0) + 1,
+        "step_log": step_log + [f"Researcher: added {len(new_findings)} gap-fill finding(s)"],
+    }
 
 
 def _summarize_args(args: dict) -> str:
