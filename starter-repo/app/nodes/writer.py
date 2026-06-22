@@ -99,12 +99,27 @@ def _check_urls(report: str, allowed: set[str]) -> tuple[str, set[str]]:
 
 
 def writer_node(state: ResearchState) -> dict:
+    findings = state["findings"]
+
+    if not findings:
+        return {
+            "report": (
+                "# Research Report\n\n"
+                "The research agent was unable to collect verifiable findings for this question. "
+                "This can happen when web search results are temporarily unavailable or the question "
+                "requires sources not accessible to the current tool set.\n\n"
+                f"**Question:** {state['question']}\n\n"
+                "Please try again or rephrase the question."
+            ),
+            "step_log": state["step_log"] + ["Writer: no findings available — returned guidance"],
+        }
+
     model = get_chat_model()
     payload = json.dumps(
         {
             "question": state["question"],
             "sub_questions": state["sub_questions"],
-            "findings": state["findings"],
+            "findings": findings,
         },
         indent=2,
     )
@@ -117,8 +132,8 @@ def writer_node(state: ResearchState) -> dict:
     from app.nodes._utils import extract_text
     report = extract_text(ai_msg)
 
-    allowed = _allowed_urls(state["findings"])
-    report = _finalize_citations(report, state["findings"])
+    allowed = _allowed_urls(findings)
+    report = _finalize_citations(report, findings)
     report, bad_urls = _check_urls(report, allowed)
 
     step_log = [*state["step_log"], "Writer: report drafted"]

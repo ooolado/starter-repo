@@ -13,9 +13,12 @@ from app.graph import ResearchState
 from app.guardrails import check_input_guardrail
 from app.llm import get_chat_model
 from app.nodes._utils import extract_text, guardrail_blocked
+MAX_SUB_QUESTIONS = 5
+
 SYSTEM_PROMPT = (
-    "You are a research planner. Decompose the user's question into 3-7 sub-questions "
-    "that, taken together, fully cover the question. Tag each as 'web' (current/news/general), "
+    f"You are a research planner. Decompose the user's question into 2-{MAX_SUB_QUESTIONS} sub-questions "
+    "that, taken together, fully cover the question. For simple questions use fewer sub-questions (2-3). "
+    "Tag each as 'web' (current/news/general), "
     "'local' (likely in our internal docs corpus), or 'both'.\n\n"
     "Reply ONLY with JSON in this exact format:\n"
     '{"sub_questions": [{"text": "...", "source": "web|local|both"}, ...]}'
@@ -86,7 +89,8 @@ def planner_node(state: ResearchState) -> dict:
             SubQuestion(text=state["question"], source="web"),
         ])
 
+    sqs = result.sub_questions[:MAX_SUB_QUESTIONS]
     return {
-        "sub_questions": [sq.model_dump() for sq in result.sub_questions],
-        "step_log": state["step_log"] + [f"Planner: {len(result.sub_questions)} sub-questions"],
+        "sub_questions": [sq.model_dump() for sq in sqs],
+        "step_log": state["step_log"] + [f"Planner: {len(sqs)} sub-questions"],
     }

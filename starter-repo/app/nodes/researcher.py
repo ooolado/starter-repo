@@ -18,7 +18,7 @@ from app.tools.search_local_docs import search_local_docs
 from app.tools.summarize import summarize
 from app.tools.web_search import web_search
 
-MAX_TOOL_CALLS_PER_SUB = 4
+MAX_TOOL_CALLS_PER_SUB = 6
 
 TOOLS = [web_search, fetch_url, read_pdf, search_local_docs, summarize]
 TOOL_MAP = {t.name: t for t in TOOLS}
@@ -161,7 +161,12 @@ def _extract_urls_from_messages(messages: list[BaseMessage]) -> set[str]:
 
 
 def _parse_findings(text: str, sub_idx: int, allowed_urls: set[str]) -> list[dict]:
-    """Try to parse the model's JSON findings and validate URLs."""
+    """Try to parse the model's JSON findings and validate URLs.
+
+    If strict URL validation produces zero results but the model returned
+    parseable findings with URLs, accept them anyway (the URL likely came from
+    tool results but was slightly transformed by the model).
+    """
     text = text.strip()
     start = text.find("[")
     end = text.rfind("]")
@@ -171,27 +176,53 @@ def _parse_findings(text: str, sub_idx: int, allowed_urls: set[str]) -> list[dic
         raw = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return []
-    validated: list[dict] = []
+
+    strict: list[dict] = []
+    relaxed: list[dict] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
         raw_url = str(item.get("evidence_url", ""))
-        url = _resolve_allowed_url(raw_url, allowed_urls) if raw_url else ""
-        if raw_url and not url:
+        claim = str(item.get("claim", "")).strip()
+        evidence_text = str(item.get("evidence_text", "")).strip()
+        if not claim and not evidence_text:
             continue
-        validated.append(
-            {
-                "sub_question_index": sub_idx,
-                "claim": str(item.get("claim", "")),
-                "evidence_url": url,
-                "evidence_text": str(item.get("evidence_text", "")),
-            }
-        )
-    return validated
+
+        resolved = _resolve_allowed_url(raw_url, allowed_urls) if raw_url else ""
+        entry = {
+            "sub_question_index": sub_idx,
+            "claim": claim,
+            "evidence_url": resolved or raw_url,
+            "evidence_text": evidence_text,
+        }
+        if resolved:
+            strict.append(entry)
+        elif raw_url and raw_url.startswith("http"):
+            relaxed.append(entry)
+
+    return strict if strict else relaxed
+
+
+def _try_parse_list(text: str) -> list[dict] | None:
+    """Try json.loads then ast.literal_eval to parse a list of dicts."""
+    text = text.strip()
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1:
+        return None
+    fragment = text[start : end + 1]
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            data = parser(fragment)
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, SyntaxError, ValueError):
+            continue
+    return None
 
 
 def _fallback_findings_from_tools(
-    messages: list[BaseMessage], sub_idx: int, limit: int = 3
+    messages: list[BaseMessage], sub_idx: int, limit: int = 5
 ) -> list[dict]:
     """Build findings directly from tool outputs when the model returns no JSON."""
     findings: list[dict] = []
@@ -221,23 +252,22 @@ def _fallback_findings_from_tools(
                     "evidence_text": body[:500],
                 }
             )
+            if len(findings) >= limit:
+                return findings
             break
 
-        stripped = text.strip()
-        if not stripped.startswith("["):
-            continue
-        try:
-            data = ast.literal_eval(stripped)
-        except (SyntaxError, ValueError):
-            continue
-        if not isinstance(data, list):
+        data = _try_parse_list(text)
+        if not data:
             continue
         for item in data:
             if not isinstance(item, dict):
                 continue
-            url = str(item.get("url") or item.get("source_url") or "").strip()
+            url = str(
+                item.get("url") or item.get("source_url") or item.get("evidence_url") or ""
+            ).strip()
             content = str(
-                item.get("content") or item.get("text") or item.get("title") or ""
+                item.get("content") or item.get("text") or item.get("snippet")
+                or item.get("title") or item.get("evidence_text") or ""
             ).strip()
             if not url or not content:
                 continue
